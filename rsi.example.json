@@ -1,0 +1,13 @@
+{
+  "repository": "stmatengss/Mooncake",
+  "base_ref": "main",
+  "project_interval_seconds": 43200,
+  "policy_interval_seconds": 86400,
+  "max_model_calls_per_day": 24,
+  "max_open_proposals": 2,
+  "publish_projects": false,
+  "targets": [
+    "scripts/generate_cluster_topology.py",
+    "scripts/check_hicache_hugepage_requirements.py"
+  ]
+}

@@ -1,0 +1,51 @@
+[
+  {
+    "split": "dev",
+    "source": "def last(values):\n    \"\"\"Return the last element of a nonempty list.\"\"\"\n    return values[len(values)]\n",
+    "expected_lines": [
+      3
+    ]
+  },
+  {
+    "split": "dev",
+    "source": "def contains(values, target):\n    for value in values:\n        if value == target:\n            return True\n        return False\n    return False\n",
+    "expected_lines": [
+      5
+    ]
+  },
+  {
+    "split": "dev",
+    "source": "def get_or_none(values, index):\n    if 0 <= index < len(values):\n        return values[index]\n    return None\n",
+    "expected_lines": []
+  },
+  {
+    "split": "dev",
+    "source": "def total(values):\n    result = 0\n    for value in values:\n        result += value\n    return result\n",
+    "expected_lines": []
+  },
+  {
+    "split": "holdout",
+    "source": "def average(values):\n    \"\"\"Return zero for an empty list, otherwise its arithmetic mean.\"\"\"\n    return sum(values) / len(values)\n",
+    "expected_lines": [
+      3
+    ]
+  },
+  {
+    "split": "holdout",
+    "source": "def append_copy(values, item):\n    \"\"\"Return a new list with item appended; never mutate values.\"\"\"\n    result = values\n    result.append(item)\n    return result\n",
+    "expected_lines": [
+      3,
+      4
+    ]
+  },
+  {
+    "split": "holdout",
+    "source": "def safe_average(values):\n    if not values:\n        return 0\n    return sum(values) / len(values)\n",
+    "expected_lines": []
+  },
+  {
+    "split": "holdout",
+    "source": "def with_item(values, item):\n    result = list(values)\n    result.append(item)\n    return result\n",
+    "expected_lines": []
+  }
+]
