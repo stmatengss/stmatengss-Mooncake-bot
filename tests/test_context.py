@@ -74,6 +74,25 @@ def test_bounded_ci_retains_failure_evidence():
     assert view["coverage_limits"]
 
 
+def test_added_file_keeps_full_diff_before_redundant_prose():
+    patch = "@@ -0,0 +1,5000 @@\n" + "+value = 1\n" * 5000
+    context = {
+        "files": [
+            {
+                "filename": "new.py",
+                "status": "added",
+                "content": "value = 1\n" * 5000,
+                "patch": patch,
+            }
+        ],
+        "guidance": {"AGENTS.md": "Repository guidance.\n" * 2500},
+    }
+    view = compact_context(context)
+    assert size(view) <= MAX_CONTEXT_BYTES
+    assert view["files"][0]["patch"] == patch
+    assert "source_excerpt" not in view["files"][0]
+
+
 def test_ci_context_does_not_fetch_full_changed_source(tmp_path):
     github = GitHub(Config(root=tmp_path))
     github.authorize = lambda _task: None

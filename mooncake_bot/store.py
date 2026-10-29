@@ -56,7 +56,7 @@ class Store:
             ).fetchone()
             if row:
                 db.execute(
-                    "UPDATE tasks SET state='running',updated=? WHERE id=?",
+                    "UPDATE tasks SET state='running',not_before=0,updated=? WHERE id=?",
                     (time.time(), row["id"]),
                 )
                 return dict(row)

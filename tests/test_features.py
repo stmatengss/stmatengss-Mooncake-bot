@@ -353,6 +353,18 @@ def test_old_queue_migration_preserves_rows_and_write_once_actions(config):
     assert not Store(directory).reserve_action("run:1:attempt:1")
 
 
+def test_resumed_budget_task_clears_waiting_status(config, task, monkeypatch):
+    store = Store(config.path("data_dir"))
+    row = store.enqueue(task)
+    reset = time.time() + 86400
+    store.defer(row["id"], reset)
+    assert store.claim(2) is None
+    monkeypatch.setattr("mooncake_bot.store.time.time", lambda: reset + 1)
+    assert store.claim(2)["id"] == row["id"]
+    resumed = store.list()[0]
+    assert resumed["state"] == "running" and resumed["not_before"] == 0
+
+
 def failed_run(pr):
     return {
         "id": 11,

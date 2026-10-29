@@ -38,7 +38,8 @@ def compact_context(context, maximum=MAX_CONTEXT_BYTES):
     view["coverage_limits"] = [COVERAGE_LIMIT]
     for file in view.get("files", []):
         if file.get("content"):
-            file["source_excerpt"] = source_excerpt(file["content"], file.get("patch"))
+            if file.get("status") != "added":
+                file["source_excerpt"] = source_excerpt(file["content"], file.get("patch"))
             file["content"] = None
             file["content_complete"] = False
     ci = view.get("ci", {})
@@ -78,6 +79,9 @@ def compact_context(context, maximum=MAX_CONTEXT_BYTES):
         candidates = list(texts(view))
         if not candidates:
             raise ValueError("Context metadata exceeds the bounded analysis input limit")
+        # Preserve diff anchors before redundant source, prose and check output.
+        # Otherwise a model may see a source line whose diff was already omitted.
+        candidates = [r for r in candidates if r[1] != "patch"] or candidates
         parent, key, text = max(candidates, key=lambda item: len(item[2].encode()))
         parent[key] = clip(text, max(256, len(text.encode()) // 2))
         if key == "patch":
