@@ -118,7 +118,8 @@ def apply_change(path, original, change):
     updated = original.replace(change["before"], change["after"], 1)
     if updated == original or len(updated.encode()) > 50000:
         raise ValueError("Empty or oversized project proposal")
-    ast.parse(updated)
+    if path.endswith(".py"):
+        ast.parse(updated)
     patch = "".join(
         difflib.unified_diff(
             original.splitlines(True),
@@ -166,6 +167,10 @@ class Worker:
         self.state = state or State(config.path("data_dir") / "rsi")
         self.task = {"installation": config.installation_ids[0]}
 
+    @property
+    def budget_limit(self):
+        return min(self.settings.max_model_calls_per_day, self.config.max_model_calls_per_day)
+
     def get(self, suffix, **kwargs):
         return self.github.get(self.github.prefix + suffix, self.task, **kwargs)
 
@@ -174,11 +179,11 @@ class Worker:
         return sum(pr["head"]["ref"].startswith("rsi/project-") for pr in opened)
 
     async def ask(self, data, schema, policy, directory):
-        self.state.reserve(self.settings.max_model_calls_per_day)
+        self.state.reserve(self.budget_limit)
         return await invoke(self.config, data, schema, policy, directory)
 
     async def review(self, context, directory, instruction):
-        self.state.reserve(self.settings.max_model_calls_per_day)
+        self.state.reserve(self.budget_limit)
         task = {"command": "review", "body": "请审查新增行，只报告有明确依据的正确性缺陷。"}
         result = await analyze_kimi(self.config, task, context, directory, instruction)
         return check_result(result, context)
@@ -379,7 +384,7 @@ class Worker:
                     for split in ["dev", "holdout"]
                 ):
                     return
-        if self.state.used() + 2 * len(cases) + 1 > self.settings.max_model_calls_per_day:
+        if self.state.used() + 2 * len(cases) + 1 > self.budget_limit:
             return
         run_id = self.state.begin("policy", self.state.day() + ":" + digest(parent))
         directory = self.state.directory / run_id
@@ -459,7 +464,7 @@ class Worker:
             return
         if self.settings.publish_projects:
             self.publish_pending()
-        if self.state.used() >= self.settings.max_model_calls_per_day:
+        if self.state.used() >= self.budget_limit:
             return
         if self.state.due("policy", self.settings.policy_interval_seconds):
             await self.improve_policy()
@@ -475,7 +480,7 @@ def main(config, settings_path, command):
             json.dumps(
                 {
                     "model_calls_today_utc": worker.state.used(),
-                    "limit": settings.max_model_calls_per_day,
+                    "limit": worker.budget_limit,
                     "paused": (worker.state.directory / "STOP").exists(),
                     "runs": worker.state.recent(),
                 },

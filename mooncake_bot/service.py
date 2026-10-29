@@ -2,79 +2,64 @@ import asyncio
 import hashlib
 import hmac
 import json
-import re
+import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 
-from .agent import analyze, render
+from .agent import analyze, check_result, render
+from .commands import parse_tasks
 from .github import GitHub, GitHubError
 from .store import Store
 
 MAX_BODY = 2 * 1024 * 1024
+LOG = logging.getLogger(__name__)
 
 
 def parse_event(config, event, payload):
-    if not isinstance(payload, dict):
-        raise ValueError("Expected an object")
-    if (
-        event not in {"issue_comment", "pull_request_review_comment"}
-        or payload.get("action") != "created"
-    ):
-        return None
-    repo, actor, comment = payload["repository"], payload["sender"], payload["comment"]
-    if repo["id"] != config.repository_id or repo["full_name"] != config.repository:
-        raise ValueError("Repository is not enrolled")
-    installation = payload["installation"]["id"]
-    if installation not in config.installation_ids:
-        raise ValueError("Installation is not enrolled")
-    if actor["type"] != "User" or actor["id"] not in config.allowed_actor_ids:
-        return None
-    if comment["user"]["id"] != actor["id"]:
-        raise ValueError("Comment author and sender do not match")
-    match = re.match(
-        r"^\s*@" + re.escape(config.mention) + r"\s+(review|explain-ci)\b", comment["body"], re.I
-    )
-    if not match:
-        return None
-    item = payload.get("issue") or payload.get("pull_request")
-    if event == "issue_comment" and "pull_request" not in item:
-        return None
-    return {
-        "source": f"{event}:{comment['id']}",
-        "event": event,
-        "installation": installation,
-        "number": item["number"],
-        "actor": actor["login"],
-        "actor_id": actor["id"],
-        "comment_id": comment["id"],
-        "body": comment["body"],
-        "command": match[1].lower(),
-    }
+    tasks = parse_tasks(config, event, payload)
+    return tasks[0] if tasks else None
 
 
 async def execute(config, store, github, row, analyzer=analyze):
+    from .features import run
+    from .rsi_state import BudgetExhausted
+
     task = json.loads(row["payload"])
     directory = config.path("data_dir") / "tasks" / row["id"]
     try:
         context = await asyncio.to_thread(github.context, task)
-        result = await analyzer(config, task, context, directory)
+        result = await run(config, store, github, task, context, directory, analyzer)
+        if not result.get("builtin"):
+            check_result(result, context)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         body = render(row["id"], context, result, config.backend)
         (directory / "comment.md").write_text(body)
         store.update(row["id"], "running", result=json.dumps(result))
         if config.publish:
+            context["_result"] = result
+            context["_directory"] = directory
             store.update(row["id"], "publishing")
             url = await asyncio.to_thread(github.publish, task, context, body)
             store.update(row["id"], "succeeded", published_url=url)
         else:
             store.update(row["id"], "preview")
+    except BudgetExhausted:
+        store.defer(row["id"], (int(time.time()) // 86400 + 1) * 86400)
     except asyncio.CancelledError:
         store.update(row["id"], "interrupted", error="Service stopped; no automatic replay")
         raise
     except Exception as exc:
         # HTTP errors from third parties may include sensitive data; keep only our safe errors.
         message = str(exc) if isinstance(exc, (GitHubError, ValueError)) else type(exc).__name__
-        store.update(row["id"], "failed", error=message[:300])
+        fields = {"error": message[:300]}
+        receipt = directory / "publication.json"
+        if receipt.exists():
+            published = json.loads(receipt.read_text()).get("html_url")
+            if published:
+                fields["published_url"] = published
+        store.update(row["id"], "failed", **fields)
 
 
 def create_app(config, github=None, analyzer=analyze, workers=True):
@@ -82,11 +67,28 @@ def create_app(config, github=None, analyzer=analyze, workers=True):
     if len(secret) < 32:
         raise ValueError("A strong webhook secret is required")
     store, github = Store(config.path("data_dir")), github or GitHub(config)
+    scan_requested = asyncio.Event()
 
     @asynccontextmanager
     async def lifespan(app):
         store.recover()
         active = set()
+
+        async def reconcile():
+            from .automation import scan
+
+            while True:
+                started = time.monotonic()
+                try:
+                    await asyncio.to_thread(scan, config, github, store)
+                except Exception as exc:
+                    LOG.warning("Automation scan failed (%s)", type(exc).__name__)
+                try:
+                    await asyncio.wait_for(scan_requested.wait(), config.scan_interval_seconds)
+                    scan_requested.clear()
+                    await asyncio.sleep(max(0, 30 - (time.monotonic() - started)))
+                except TimeoutError:
+                    pass
 
         async def dispatch():
             while True:
@@ -100,12 +102,14 @@ def create_app(config, github=None, analyzer=analyze, workers=True):
                 await asyncio.sleep(0.5)
 
         scheduler = asyncio.create_task(dispatch()) if workers else None
+        scanner = asyncio.create_task(reconcile()) if workers and config.connected else None
         try:
             yield
         finally:
-            if scheduler:
-                scheduler.cancel()
-                await asyncio.gather(scheduler, return_exceptions=True)
+            for background in [scheduler, scanner]:
+                if background:
+                    background.cancel()
+                    await asyncio.gather(background, return_exceptions=True)
             pending = list(active)
             for work in pending:
                 work.cancel()
@@ -138,12 +142,17 @@ def create_app(config, github=None, analyzer=analyze, workers=True):
         if event == "ping":
             return {"accepted": True}
         try:
-            task = parse_event(config, event, json.loads(body))
+            tasks = parse_tasks(config, event, json.loads(body))
         except (ValueError, KeyError, TypeError):
             raise HTTPException(403, "Malformed or unauthorized event") from None
-        if not task:
+        if event == "workflow_run" and config.auto_ci:
+            scan_requested.set()
+        if not tasks:
             return {"accepted": False}
-        row = store.enqueue(task)
-        return {"accepted": True, "task_id": row["id"], "state": row["state"]}
+        rows = [store.enqueue(task) for task in tasks]
+        reply = {"accepted": True, "task_id": rows[0]["id"], "state": rows[0]["state"]}
+        if len(rows) > 1:
+            reply["task_ids"] = [row["id"] for row in rows]
+        return reply
 
     return app

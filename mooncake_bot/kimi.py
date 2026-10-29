@@ -7,7 +7,7 @@ import signal
 
 from jsonschema import validate
 
-from .agent import POLICY, SCHEMA, check_result
+from .agent import POLICY, SCHEMA, check_result, command_policy
 from .child import guarded_args
 
 # Linux limits each argv entry to 128 KiB. Reject large requests, never truncate them.
@@ -55,7 +55,8 @@ def active_instruction(config):
 async def analyze_kimi(config, task, context, directory, instruction=None):
     data = {"command": task["command"], "request": task["body"], "context": context}
     extension = active_instruction(config) if instruction is None else instruction
-    result = await invoke(config, data, SCHEMA, POLICY + "\n" + extension, directory)
+    policy = POLICY + "\n" + command_policy(task["command"]) + "\n" + extension
+    result = await invoke(config, data, SCHEMA, policy, directory)
     return check_result(result, context)
 
 

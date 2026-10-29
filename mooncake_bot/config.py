@@ -1,7 +1,7 @@
 import json
 import tomllib
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 @dataclass
@@ -30,6 +30,28 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8821
     webhook_url: str = ""
+    max_model_calls_per_day: int = 24
+    auto_review: bool = False
+    auto_summary: bool = False
+    auto_title: bool = False
+    auto_triage: bool = False
+    auto_ci: bool = False
+    automation_author_ids: list[int] = field(default_factory=list)
+    scan_interval_seconds: int = 300
+    enable_fix_prs: bool = False
+    max_fix_prs: int = 2
+    fix_paths: list[str] = field(
+        default_factory=lambda: [
+            "scripts/",
+            "test/",
+            "tests/",
+            "mooncake-store/",
+            "mooncake-transfer-engine/",
+            "mooncake-common/",
+            "mooncake-p2p-store/",
+            "mooncake-integration/",
+        ]
+    )
 
     @classmethod
     def load(cls, path: str | Path):
@@ -43,6 +65,41 @@ class Config:
             raise ValueError("Registration owner type must be User or Organization")
         if config.backend not in {"codex", "kimi"}:
             raise ValueError("Analysis backend must be codex or kimi")
+        if any(
+            type(getattr(config, name)) is not bool
+            for name in [
+                "auto_review",
+                "auto_summary",
+                "auto_title",
+                "auto_triage",
+                "auto_ci",
+                "enable_fix_prs",
+            ]
+        ):
+            raise ValueError("Feature switches must be booleans")
+        if (
+            type(config.max_model_calls_per_day) is not int
+            or not 1 <= config.max_model_calls_per_day <= 96
+            or type(config.scan_interval_seconds) is not int
+            or not 60 <= config.scan_interval_seconds <= 3600
+            or type(config.max_fix_prs) is not int
+            or not 1 <= config.max_fix_prs <= 5
+        ):
+            raise ValueError("Automation budget, scan interval or draft limit is invalid")
+        if any(
+            type(value) is not int or value <= 0
+            for value in config.allowed_actor_ids + config.automation_author_ids
+        ):
+            raise ValueError("Actor allowlists require positive numeric IDs")
+        for prefix in config.fix_paths:
+            if (
+                not isinstance(prefix, str)
+                or not prefix.endswith("/")
+                or prefix.startswith("/")
+                or ".." in PurePosixPath(prefix).parts
+                or prefix.startswith(".github/")
+            ):
+                raise ValueError("Fix prefixes must be explicit repository directories")
         return config
 
     def path(self, name):

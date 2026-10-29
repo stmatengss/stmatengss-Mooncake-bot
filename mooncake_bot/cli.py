@@ -25,6 +25,7 @@ def main():
             "rsi",
             "rsi-once",
             "rsi-status",
+            "scan-once",
         ],
     )
     parser.add_argument("--config", default="config.toml")
@@ -35,6 +36,13 @@ def main():
         from .rsi import main as rsi_main
 
         rsi_main(config, Path(args.rsi_config).resolve(), args.command)
+    elif args.command == "scan-once":
+        from .automation import scan
+        from .github import GitHub
+
+        print(
+            json.dumps({"task_ids": scan(config, GitHub(config), Store(config.path("data_dir")))})
+        )
     elif args.command == "tunnel":
         from .tunnel import run_tunnel
 
