@@ -197,6 +197,9 @@ class GitHub:
             raise GitHubError("PR file list is incomplete or exceeds the 60-file limit")
         used = 0
         for item in files:
+            if task["command"] in {"explain-ci", "auto-ci"}:
+                context["files"].append({"filename": item["filename"]})
+                continue
             text = self.file(item["filename"], context["head"], task)
             used += len((text or "").encode()) + len(item.get("patch", "").encode())
             if used > 600_000:

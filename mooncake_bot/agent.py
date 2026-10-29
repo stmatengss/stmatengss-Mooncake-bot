@@ -6,6 +6,8 @@ import signal
 
 from jsonschema import validate
 
+from .context import check_analysis, compact_context
+
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -46,6 +48,8 @@ means none established within the supplied context, not approval. Follow the req
 COMMAND_POLICY = {
     "review": "Begin the summary with the concrete change and review outcome. Mention observed "
     "checks separately from proposed validation. Findings must be actionable correctness defects.",
+    "explain-ci": "Explain observed failing checks/steps and annotations. Distinguish evidence "
+    "from suspected causes and proposed next steps. Use findings=[].",
     "ask": "Answer the maintainer's question using the supplied evidence. Use findings=[]; "
     "put the answer and concrete repository paths in summary.",
     "plan": "Produce an actionable implementation and validation plan with relevant file paths. "
@@ -99,6 +103,7 @@ async def analyze(config, task, context, directory):
         from .kimi import analyze_kimi
 
         return await analyze_kimi(config, task, context, directory)
+    view = compact_context(context)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     schema = directory / "schema.json"
     schema.write_text(json.dumps(SCHEMA))
@@ -109,11 +114,11 @@ async def analyze(config, task, context, directory):
         + command_policy(task["command"])
         + "\nREQUEST DATA:\n"
         + json.dumps(
-            {"command": task["command"], "request": task["body"], "context": context},
+            {"command": task["command"], "request": task["body"], "context": view},
             ensure_ascii=False,
         )
     )
-    (directory / "context.json").write_text(json.dumps(context, ensure_ascii=False))
+    (directory / "context.json").write_text(json.dumps(view, ensure_ascii=False))
     args = [
         config.codex_bin,
         "exec",
@@ -179,7 +184,7 @@ async def analyze(config, task, context, directory):
             raise
     if process.returncode or not result_path.is_file():
         raise RuntimeError("Agent did not produce a result; inspect its private local log")
-    return check_result(json.loads(result_path.read_text()), context)
+    return check_analysis(json.loads(result_path.read_text()), context, view)
 
 
 def render(task_id, context, result, backend="codex"):

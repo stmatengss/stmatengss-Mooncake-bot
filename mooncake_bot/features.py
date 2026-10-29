@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 
 from .agent import check_result
 from .commands import BUILTIN, PR_ONLY, help_text
+from .context import clip, compact_context
 from .kimi import invoke
 from .publishing import file_mode
 from .rsi import DATA_POLICY, PROPOSAL, apply_change, atomic_json, digest
@@ -127,13 +128,14 @@ async def propose_fix(config, github, task, context, directory, analyzer, budget
         return builtin(
             "Draft fixes require a branch in this repository. Fork PRs remain reviewable."
         )
-    files = [
-        r
-        for r in context["files"]
-        if fix_allowed(config, r["filename"])
-        and r.get("content")
-        and len(r["content"].encode()) <= 30000
-    ][:3]
+    files, used = [], 0
+    for row in context["files"]:
+        length = len((row.get("content") or "").encode())
+        if fix_allowed(config, row["filename"]) and 0 < length <= 30000 and used + length <= 40000:
+            files.append(row)
+            used += length
+        if len(files) == 3:
+            break
     if not files:
         return builtin(
             "No enrolled existing source file is available. Include an allowed repository "
@@ -144,14 +146,23 @@ async def propose_fix(config, github, task, context, directory, analyzer, budget
         return builtin(
             "The open fix-draft limit is reached. Review an existing draft before requesting another."
         )
+    guidance = compact_context({"guidance": context.get("guidance", {})}, 16000)
     data = {
         "request": task["body"],
         "title": context["title"],
-        "body": context["body"],
+        "body": clip(context["body"] or "", 8000),
         "head": context["head"],
         "base": context["base"],
-        "files": files,
-        "guidance": context.get("guidance", {}),
+        "files": [
+            {
+                "filename": r["filename"],
+                "content": r["content"],
+                "patch": clip(r.get("patch") or "", 4000),
+            }
+            for r in files
+        ],
+        "guidance": guidance["guidance"],
+        "coverage_limits": guidance.get("coverage_limits", []),
         "goal": "Propose at most one concrete correctness fix in one provided existing file. "
         "Return one exact before/after snippet, at most 80 changed lines, or change=null. "
         "Preserve unrelated behavior and follow repository guidance. Tests are proposals, not results.",

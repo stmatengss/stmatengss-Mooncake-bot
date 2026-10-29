@@ -156,7 +156,10 @@ broader quality claims. A tie or regression retains the current instruction.
   write. Inspect its artifacts and GitHub before manually retrying.
 - Kimi uses an isolated `KIMI_CODE_HOME`, a tool-free agent and an empty skills
   directory. No GitHub credentials enter the model subprocess environment. The
-  current CLI adapter rejects serialized requests over 100,000 UTF-8 bytes.
+  current CLI adapter rejects serialized requests over 100,000 UTF-8 bytes. Analysis contexts
+  above 64,000 bytes use bounded source/diff/check excerpts and explicitly disclose partial
+  coverage. Findings must anchor to added lines actually included in that view. CI diagnosis
+  omits full source files and uses check evidence. This does not establish whole-PR coverage.
 - Project candidates receive syntax and static-review checks, **not repository
   test execution**. Their draft PRs state this. Native, GPU and RDMA validation
   remains the submitter's responsibility.
