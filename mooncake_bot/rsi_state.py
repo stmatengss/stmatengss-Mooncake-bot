@@ -37,7 +37,7 @@ class State:
             db.execute("INSERT OR IGNORE INTO budget VALUES(?,0)", (self.day(),))
             used = db.execute("SELECT calls FROM budget WHERE day=?", (self.day(),)).fetchone()[0]
             if used >= maximum:
-                raise BudgetExhausted("Daily RSI model-call budget exhausted")
+                raise BudgetExhausted("Daily model-call budget exhausted")
             db.execute("UPDATE budget SET calls=calls+1 WHERE day=?", (self.day(),))
 
     def used(self):

@@ -7,8 +7,9 @@ import signal
 
 from jsonschema import validate
 
-from .agent import POLICY, SCHEMA, check_result
+from .agent import POLICY, SCHEMA, command_policy
 from .child import guarded_args
+from .context import check_analysis, compact_context
 
 # Linux limits each argv entry to 128 KiB. Reject large requests, never truncate them.
 MAX_PROMPT_BYTES = 100_000
@@ -53,10 +54,12 @@ def active_instruction(config):
 
 
 async def analyze_kimi(config, task, context, directory, instruction=None):
-    data = {"command": task["command"], "request": task["body"], "context": context}
+    view = compact_context(context)
+    data = {"command": task["command"], "request": task["body"], "context": view}
     extension = active_instruction(config) if instruction is None else instruction
-    result = await invoke(config, data, SCHEMA, POLICY + "\n" + extension, directory)
-    return check_result(result, context)
+    policy = POLICY + "\n" + command_policy(task["command"]) + "\n" + extension
+    result = await invoke(config, data, SCHEMA, policy, directory)
+    return check_analysis(result, context, view)
 
 
 async def invoke(config, data, schema, policy, directory):

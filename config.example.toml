@@ -20,3 +20,15 @@ tunnel_bin = ".tools/cloudflared"
 host = "127.0.0.1"
 port = 8821
 webhook_url = ""
+max_model_calls_per_day = 24
+# Opt in after enrolling the App and deciding which authors may be automated.
+auto_review = false
+auto_summary = false
+auto_title = false
+auto_triage = false
+auto_ci = false
+automation_author_ids = []
+scan_interval_seconds = 300
+enable_fix_prs = false
+max_fix_prs = 2
+fix_paths = ["scripts/", "test/", "tests/", "mooncake-store/", "mooncake-transfer-engine/", "mooncake-common/", "mooncake-p2p-store/", "mooncake-integration/"]

@@ -16,6 +16,9 @@ class Store:
                 state TEXT NOT NULL DEFAULT 'queued', created REAL NOT NULL,
                 updated REAL NOT NULL, error TEXT, result TEXT, published_url TEXT
             )""")
+            if "not_before" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
+                db.execute("ALTER TABLE tasks ADD COLUMN not_before REAL NOT NULL DEFAULT 0")
+            db.execute("CREATE TABLE IF NOT EXISTS actions(key TEXT PRIMARY KEY,state TEXT)")
         self.path.chmod(0o600)
 
     def db(self):
@@ -44,12 +47,18 @@ class Store:
             ).fetchone()[0]
             if count >= maximum:
                 return None
-            row = db.execute("""SELECT * FROM tasks q WHERE state='queued' AND NOT EXISTS (
+            row = db.execute(
+                """SELECT * FROM tasks q WHERE state='queued' AND not_before<=?
+                AND NOT EXISTS (
                 SELECT 1 FROM tasks a WHERE a.number=q.number
-                AND a.state IN ('running','publishing')) ORDER BY created LIMIT 1""").fetchone()
+                AND a.state IN ('running','publishing'))
+                ORDER BY CASE WHEN json_extract(q.payload,'$.automatic')=1 THEN 1 ELSE 0 END,
+                created LIMIT 1""",
+                (time.time(),),
+            ).fetchone()
             if row:
                 db.execute(
-                    "UPDATE tasks SET state='running',updated=? WHERE id=?",
+                    "UPDATE tasks SET state='running',not_before=0,updated=? WHERE id=?",
                     (time.time(), row["id"]),
                 )
                 return dict(row)
@@ -79,3 +88,21 @@ class Store:
             return [
                 dict(x) for x in db.execute("SELECT * FROM tasks ORDER BY created DESC LIMIT 100")
             ]
+
+    def defer(self, task_id, until):
+        with self.db() as db:
+            db.execute(
+                "UPDATE tasks SET state='queued',not_before=?,updated=?,error=? WHERE id=?",
+                (
+                    until,
+                    time.time(),
+                    "Daily model budget exhausted; waiting for UTC reset",
+                    task_id,
+                ),
+            )
+
+    def reserve_action(self, key):
+        """Record an attempt before an external mutation; ambiguous actions are never replayed."""
+        with self.db() as db:
+            result = db.execute("INSERT OR IGNORE INTO actions VALUES(?,'attempted')", (key,))
+            return result.rowcount == 1

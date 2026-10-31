@@ -11,24 +11,66 @@ Bot 源码在本仓库独立维护；业务仓库是 `stmatengss/Mooncake`。
 
 ## 使用方法
 
-在目标仓库的开放 PR 下新发一条评论：
+在 `stmatengss/Mooncake` 的 Issue 或开放 PR 下新发一条评论。维护者可使用：
+
+| 命令（前面加 `@stmatengss-mooncake-bot`） | 功能 | 适用位置 |
+| --- | --- | --- |
+| `review` | 一次 COMMENT review，包含摘要和经过行号校验的按行缺陷；同一提交的相同行不重复评论 | PR |
+| `summary` | 更新 Bot 自己的摘要评论 | PR |
+| `describe` | 更新 PR 描述中的 Bot 标记块，保留作者原文和 checklist | PR |
+| `title` | 按 Mooncake 前缀规范整理标题 | PR |
+| `ask <问题>` 或直接写问题 | 根据提供的代码与讨论回答 | Issue / PR |
+| `plan <目标>` | 给出实现步骤与待执行的验证计划 | Issue / PR |
+| `triage` | 分析模块、严重性、缺失复现信息和建议标签 | Issue / PR |
+| `fix <文件路径和修复要求>` | 单文件、最多 80 行的补丁，经独立静态 review 后创建草稿 PR | Issue / PR |
+| `explain-ci` | 解释当前提交失败的检查、步骤和 annotations | PR |
+| `rerun-ci [run-id]` | 重跑当前提交上已完成失败的 GitHub Actions jobs，最多三次 attempt | PR |
+| `help` / `status` | 命令说明 / 本 Issue 或 PR 的任务状态、共享预算和 RSI 进展 | Issue / PR |
+
+示例：
 
 ```text
 @stmatengss-mooncake-bot review
+@stmatengss-mooncake-bot fix scripts/generate_cluster_topology.py 处理延迟解析失败的情况
+@stmatengss-mooncake-bot status
 ```
 
-解释失败的 CI：
+Issue 中说明具体文件路径，可以让问答、计划和修复读取对应文件。
+修改旧评论不会触发；命令必须位于新评论开头，只有配置中允许且当前仍有仓库写权限的维护者能触发。
+CI 解释使用检查结果和失败步骤，不读取原始日志。重跑请求成功只说明 GitHub 接收了调度请求。
+
+## 自动功能
+
+启用相应配置后，无需每次输入命令：
+
+- `auto_review`：非草稿 PR 打开、更新或转为 ready 后，生成摘要与按行缺陷审查。
+- `auto_summary`：未启用自动 review 时，单独维护摘要评论；启用 review 时复用其摘要，不额外调用模型。
+- `auto_title`：为缺少前缀的 PR 标题补充 `[Bugfix]`、`[Doc]`、`[CI/Build]` 等前缀。
+- `auto_triage`：为新建、重新打开或修改的 Issue 提供排查方案和标签建议，不自动改标签。
+- `auto_ci`：当前 PR 提交的 CI 失败后更新诊断评论，不自动重跑 CI。
+
+自动任务只处理 `automation_author_ids` 中的作者；为空则使用维护者白名单。
+如需处理本 App 创建的 PR，将其准确的 Bot 数字 ID 显式加入；其他 Bot 不会获得授权。
+在 Issue / PR 描述加入 `<!-- mooncake-bot SKIP -->` 可跳过自动处理。
+
+除 webhook 外，每 300 秒扫描最近更新的 20 个开放 PR 和 20 个开放 Issue，
+恢复遗漏的事件。扫描按提交和任务类型持久化去重，已失败或中断的任务不会被重复发布。
+扫描也支持当前仅订阅评论事件的安装。若要即时响应，可在 App 设置额外订阅
+Pull request、Issues 和 Workflow run 事件。手动扫描：
 
 ```text
-@stmatengss-mooncake-bot explain-ci
+mooncake-bot scan-once --config /path/to/config.toml
 ```
 
-只有配置中允许的维护者能触发；修改旧评论、创建 PR、推送提交不会触发 review。
-回复会注明分析的提交和 AI 辅助信息。CI 解释使用检查结果和失败步骤，不读取原始日志。
+`fix` 只修改 `fix_paths` 下提供的现有源码文件，最多三个输入文件、一个修改文件。
+不修改 workflow、治理指令或密钥，不执行仓库代码；保留原文件 mode，拒绝符号链接。
+Python 做语法检查；其他支持的语言只检查补丁边界，不等同于编译通过。
+PR 中请求的修复会创建一个以该 PR 分支为 base 的子草稿 PR，Issue 中请求则以默认分支为 base。
+跨仓库 fork PR 可审查，但不会在其分支上创建修复。默认最多两个开放 `sima/bot-fix-*` 草稿。
 
 RSI 在 DSW 独立常驻：项目循环每 12 小时检查指定脚本，有实际缺陷时保存候选，
 获得 App Contents 写权限并开启发布后创建草稿 PR；Bot 循环每 24 小时评估审查指令，
-仅在留出集有提升且没有回归时启用新指令。每日最多 24 次 RSI 模型调用，最多两个开放候选 PR。
+仅在留出集有提升且没有回归时启用新指令。所有入口共享可配置的每日模型调用上限（示例为 24 次），项目循环最多两个开放候选 PR。
 候选 PR 由维护者审阅和合并。
 
 ## 本地开发
@@ -56,9 +98,8 @@ Linux/DSW 使用 `deploy/dsw-supervisor.conf`；运维入口见下文。
 
 Three Supervisor programs run independently on the configured DSW instance:
 
-- `stmatengss-mooncake-bot`: accepts signed, authorized PR comment events and
-  processes the persistent SQLite queue. Commands are
-  `@stmatengss-mooncake-bot review` and `@stmatengss-mooncake-bot explain-ci`.
+- `stmatengss-mooncake-bot`: accepts signed, authorized comment and automation events,
+  reconciles recent PRs/issues/workflow failures and processes the persistent SQLite queue.
 - `stmatengss-mooncake-tunnel`: supervises Cloudflare, probes the public endpoint
   with signed pings, and updates the GitHub App webhook after an address change.
 - `stmatengss-mooncake-rsi`: checks its persistent schedule every minute and runs
@@ -104,15 +145,25 @@ broader quality claims. A tie or regression retains the current instruction.
 
 ## Limits, failure and recovery
 
-- The RSI budget defaults to **24 model invocations per UTC day**, including
-  failed invocations. Manual PR commands have their own existing queue and timeout.
+- Manual commands, automatic tasks and RSI share **24 model invocations per UTC day**,
+  including failed invocations. A fix normally needs two calls: proposal and independent review.
+  Help, status, title normalization and CI retry use no model. Model tasks wait in the durable
+  queue until the next UTC reset if the budget is exhausted; utility commands can still run.
+  Eligible maintainer commands take priority over automatic work; tasks on the same PR remain serial.
+  RSI also obeys its separately configured limit when lower than this global cap.
+  To raise the deployed allowance, update `max_model_calls_per_day` consistently in the live
+  `config.toml` and `rsi.json`, then restart the bot and RSI programs. Confirm the effective
+  allowance with `status` and `rsi-status`; changing the limit does not clear recorded usage.
 - At most two project candidate PRs may remain open. Identical source content is
   not proposed again after a completed, failed or interrupted attempt.
 - Restart never automatically repeats an interrupted attempt or ambiguous remote
   write. Inspect its artifacts and GitHub before manually retrying.
 - Kimi uses an isolated `KIMI_CODE_HOME`, a tool-free agent and an empty skills
   directory. No GitHub credentials enter the model subprocess environment. The
-  current CLI adapter rejects serialized requests over 100,000 UTF-8 bytes.
+  current CLI adapter rejects serialized requests over 100,000 UTF-8 bytes. Analysis contexts
+  above 64,000 bytes use bounded source/diff/check excerpts and explicitly disclose partial
+  coverage. Findings must anchor to added lines actually included in that view. CI diagnosis
+  omits full source files and uses check evidence. This does not establish whole-PR coverage.
 - Project candidates receive syntax and static-review checks, **not repository
   test execution**. Their draft PRs state this. Native, GPU and RDMA validation
   remains the submitter's responsibility.
@@ -183,7 +234,8 @@ ruff format --check mooncake_bot tests
 The GitHub workflow runs CPU tests without model credentials or write permissions.
 Unit tests cover event authentication, deduplication, stale-head rejection, Kimi
 stream validation, budget persistence, patch scope, holdout separation, promotion
-gates and draft publication. Real model evaluations and webhook deliveries are
+gates, command routing, migration, inline publication, CI retry and child draft publication.
+Real model evaluations and webhook deliveries are
 separate operational checks.
 
 Kimi agent restrictions follow the [official agent-file documentation](https://moonshotai.github.io/kimi-code/en/customization/agents).
