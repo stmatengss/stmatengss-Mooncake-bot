@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from pathlib import PurePosixPath
 
 from .agent import check_result
@@ -77,7 +78,8 @@ def status(config, store, task, context, budget):
     ]
     for row in rows:
         request = json.loads(row["payload"])
-        state = row["state"] + (" (waiting for UTC reset)" if row.get("not_before", 0) else "")
+        waiting = row["state"] == "queued" and row.get("not_before", 0) > time.time()
+        state = row["state"] + (" (waiting for UTC reset)" if waiting else "")
         lines.append(
             f"- `{row['id'][:12]}` · `{request['command']}` · {state}"
             + (f" · [result]({row['published_url']})" if row.get("published_url") else "")

@@ -1,6 +1,7 @@
 """Trusted publishers. Model output never chooses API routes, branches or credentials."""
 
 import re
+import threading
 
 from .agent import check_result
 from .commands import normalized_title
@@ -10,6 +11,7 @@ from .store import Store
 
 DESCRIPTION_START = "<!-- mooncake-bot:description:start -->"
 DESCRIPTION_END = "<!-- mooncake-bot:description:end -->"
+FIX_PUBLISH_LOCK = threading.Lock()
 
 
 def managed_description(original, block):
@@ -18,6 +20,8 @@ def managed_description(original, block):
         raise ValueError("Unbalanced bot description markers")
     if original.count(DESCRIPTION_START) > 1:
         raise ValueError("Multiple bot description blocks")
+    while DESCRIPTION_START in block or DESCRIPTION_END in block:
+        block = block.replace(DESCRIPTION_START, "").replace(DESCRIPTION_END, "")
     replacement = DESCRIPTION_START + "\n" + block + "\n" + DESCRIPTION_END
     if DESCRIPTION_START in original:
         start, end = original.index(DESCRIPTION_START), original.index(DESCRIPTION_END)
@@ -154,6 +158,11 @@ def file_mode(github, base, path, task):
 
 
 def publish_fix(github, task, context):
+    with FIX_PUBLISH_LOCK:
+        return _publish_fix(github, task, context)
+
+
+def _publish_fix(github, task, context):
     from .features import fix_allowed
 
     candidate = context["_fix"]

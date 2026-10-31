@@ -51,7 +51,9 @@ class Store:
                 """SELECT * FROM tasks q WHERE state='queued' AND not_before<=?
                 AND NOT EXISTS (
                 SELECT 1 FROM tasks a WHERE a.number=q.number
-                AND a.state IN ('running','publishing')) ORDER BY created LIMIT 1""",
+                AND a.state IN ('running','publishing'))
+                ORDER BY CASE WHEN json_extract(q.payload,'$.automatic')=1 THEN 1 ELSE 0 END,
+                created LIMIT 1""",
                 (time.time(),),
             ).fetchone()
             if row:

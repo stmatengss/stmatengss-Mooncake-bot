@@ -45,12 +45,35 @@ def normalized_title(title):
     lowered = title.lower()
     category = "Misc"
     for prefix, words in [
-        ("Bugfix", ["fix", "bug", "修复"]),
-        ("Doc", ["doc", "文档"]),
-        ("CI/Build", ["ci", "build", "test", "构建", "测试"]),
-        ("Feature", ["feat", "add", "support", "新增", "支持"]),
+        ("Bugfix", ["fix", "fixes", "fixed", "fixing", "bug", "bugs", "bugfix", "修复"]),
+        ("Doc", ["doc", "docs", "documentation", "文档"]),
+        (
+            "CI/Build",
+            ["ci", "build", "builds", "building", "test", "tests", "testing", "构建", "测试"],
+        ),
+        (
+            "Feature",
+            [
+                "feat",
+                "feature",
+                "features",
+                "add",
+                "adds",
+                "added",
+                "adding",
+                "support",
+                "supports",
+                "新增",
+                "支持",
+            ],
+        ),
     ]:
-        if any(lowered.startswith(word) for word in words):
+        if any(
+            re.match(re.escape(word) + r"\b", lowered)
+            if word.isascii()
+            else lowered.startswith(word)
+            for word in words
+        ):
             category = prefix
             break
     return f"[{category}] {title}"
@@ -65,8 +88,12 @@ def automatic_task(config, item, command, kind="pr", run=None):
         return None
     if kind == "pr" and item.get("draft") and command != "auto-title":
         return None
-    if command == "auto-title" and normalized_title(item["title"]) == item["title"]:
-        return None
+    if command == "auto-title":
+        try:
+            if normalized_title(item["title"]) == item["title"]:
+                return None
+        except ValueError:
+            return None
     revision = (
         item["head"]["sha"] + ":" + item["base"]["sha"]
         if kind == "pr"

@@ -70,7 +70,7 @@ PR 中请求的修复会创建一个以该 PR 分支为 base 的子草稿 PR，I
 
 RSI 在 DSW 独立常驻：项目循环每 12 小时检查指定脚本，有实际缺陷时保存候选，
 获得 App Contents 写权限并开启发布后创建草稿 PR；Bot 循环每 24 小时评估审查指令，
-仅在留出集有提升且没有回归时启用新指令。所有入口共享每日最多 24 次模型调用，项目循环最多两个开放候选 PR。
+仅在留出集有提升且没有回归时启用新指令。所有入口共享可配置的每日模型调用上限（示例为 24 次），项目循环最多两个开放候选 PR。
 候选 PR 由维护者审阅和合并。
 
 ## 本地开发
@@ -149,7 +149,11 @@ broader quality claims. A tie or regression retains the current instruction.
   including failed invocations. A fix normally needs two calls: proposal and independent review.
   Help, status, title normalization and CI retry use no model. Model tasks wait in the durable
   queue until the next UTC reset if the budget is exhausted; utility commands can still run.
+  Eligible maintainer commands take priority over automatic work; tasks on the same PR remain serial.
   RSI also obeys its separately configured limit when lower than this global cap.
+  To raise the deployed allowance, update `max_model_calls_per_day` consistently in the live
+  `config.toml` and `rsi.json`, then restart the bot and RSI programs. Confirm the effective
+  allowance with `status` and `rsi-status`; changing the limit does not clear recorded usage.
 - At most two project candidate PRs may remain open. Identical source content is
   not proposed again after a completed, failed or interrupted attempt.
 - Restart never automatically repeats an interrupted attempt or ambiguous remote

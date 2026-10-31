@@ -3,13 +3,15 @@ import copy
 import json
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock
 
 import pytest
 
 from mooncake_bot.automation import scan
 from mooncake_bot.commands import automatic_task, normalized_title, parse_tasks, pr_tasks
 from mooncake_bot.config import Config
-from mooncake_bot.features import fix_allowed, prepare_retry, run
+from mooncake_bot.features import fix_allowed, prepare_retry, run, status
 from mooncake_bot.github import GitHub, GitHubError
 from mooncake_bot.publishing import (
     DESCRIPTION_END,
@@ -19,6 +21,7 @@ from mooncake_bot.publishing import (
     publish,
     publish_fix,
 )
+from mooncake_bot.rsi import apply_change
 from mooncake_bot.rsi_state import State
 from mooncake_bot.service import execute
 from mooncake_bot.store import Store
@@ -176,7 +179,10 @@ def test_automatic_authorization_rechecks_head_and_actor(config, pr):
         github.authorize(task)
 
 
-def test_periodic_scan_reconciles_without_duplicate_tasks(config, pr):
+@pytest.mark.parametrize("long_title", [False, True])
+def test_periodic_scan_reconciles_without_duplicate_tasks(config, pr, long_title):
+    if long_title:
+        pr["title"] = "x" * 256
     config.app_id = "1"
     config.path("app_key_file").parent.mkdir()
     config.path("app_key_file").write_text("not a real key")
@@ -192,9 +198,40 @@ def test_periodic_scan_reconciles_without_duplicate_tasks(config, pr):
                 return {"workflow_runs": []}
             return []
 
-    assert len(scan(config, API(), store)) == 2
-    assert len(scan(config, API(), store)) == 2
-    assert len(store.list()) == 2
+    expected = 1 if long_title else 2
+    assert len(scan(config, API(), store)) == expected
+    assert len(scan(config, API(), store)) == expected
+    assert len(store.list()) == expected
+
+
+@pytest.mark.parametrize(
+    "title,prefix",
+    [
+        ("address race", "Misc"),
+        ("circular buffer", "Misc"),
+        ("docker image", "Misc"),
+        ("fixture cleanup", "Misc"),
+        ("fixes a race", "Bugfix"),
+        ("docs: update usage", "Doc"),
+        ("building a wheel", "CI/Build"),
+        ("adds a guard", "Feature"),
+        ("修复内存泄漏", "Bugfix"),
+        ("支持新的协议", "Feature"),
+    ],
+)
+def test_title_keywords_use_word_boundaries(title, prefix):
+    assert normalized_title(title) == f"[{prefix}] {title}"
+
+
+def test_model_description_markers_do_not_corrupt_managed_block():
+    author = "Human text\n- [x] Verified\n"
+    block = DESCRIPTION_START + "summary" + DESCRIPTION_END
+    # Removing one delimiter may expose another; all model delimiters must disappear.
+    block += DESCRIPTION_START[:10] + DESCRIPTION_END + DESCRIPTION_START[10:]
+    first = managed_description(author, block)
+    assert first.count(DESCRIPTION_START) == first.count(DESCRIPTION_END) == 1
+    assert first.startswith(author)
+    assert managed_description(first, "updated").startswith(author)
 
 
 def test_title_and_managed_description_preserve_author_content():
@@ -365,6 +402,34 @@ def test_resumed_budget_task_clears_waiting_status(config, task, monkeypatch):
     assert resumed["state"] == "running" and resumed["not_before"] == 0
 
 
+@pytest.mark.parametrize(
+    "state,offset,waiting",
+    [
+        ("queued", 100, True),
+        ("queued", -1, False),
+        ("succeeded", 100, False),
+        ("failed", 100, False),
+    ],
+)
+def test_status_waiting_suffix_requires_a_future_queued_task(config, task, state, offset, waiting):
+    store = Store(config.path("data_dir"))
+    row = store.enqueue(task)
+    store.defer(row["id"], time.time() + offset)
+    store.update(row["id"], state)
+    budget = State(config.path("data_dir") / "rsi")
+    result = status(config, store, task, {"head": "a" * 40}, budget)
+    assert ("waiting for UTC reset" in result["summary"]) is waiting
+
+
+def test_maintainer_commands_take_priority_over_older_automation(config, task):
+    store = Store(config.path("data_dir"))
+    automatic = store.enqueue(task | {"automatic": True})
+    manual = store.enqueue(task | {"source": "issue_comment:100", "number": 30})
+    assert store.claim(1)["id"] == manual["id"]
+    store.update(manual["id"], "succeeded")
+    assert store.claim(1)["id"] == automatic["id"]
+
+
 def failed_run(pr):
     return {
         "id": 11,
@@ -488,3 +553,55 @@ def test_symlink_fix_target_rejected(config, pr, task):
     with pytest.raises(GitHubError, match="regular tracked"):
         file_mode(github, "a" * 40, "scripts/probe.py", task)
     assert not github.writes
+
+
+def test_concurrent_fix_publishers_respect_the_open_draft_limit(config, pr, task):
+    config.max_fix_prs = 1
+    both_started, second_count = Barrier(2), Event()
+
+    class SharedPublisher(Publisher):
+        def __init__(self):
+            super().__init__(config, pr)
+            self.opened, self.counts, self.guard = [], 0, Lock()
+
+        def pages(self, *_args):
+            with self.guard:
+                snapshot = list(self.opened)
+                self.counts += 1
+                first = self.counts == 1
+            if first:
+                second_count.wait(1)
+            else:
+                second_count.set()
+            return snapshot
+
+        def request(self, method, path, token, **kwargs):
+            result = super().request(method, path, token, **kwargs)
+            if path.endswith("/pulls"):
+                self.opened.append({"head": {"ref": kwargs["json"]["head"]}})
+            return result
+
+    github = SharedPublisher()
+    updated, patch = apply_change(PROPOSAL["change"]["path"], ORIGINAL, PROPOSAL["change"])
+
+    def attempt(index):
+        context = review_context(pr)
+        context["_directory"] = config.path("data_dir") / "tasks" / (str(index) * 32)
+        context["_fix"] = {
+            "path": PROPOSAL["change"]["path"],
+            "updated": updated,
+            "patch": patch,
+            "proposal": PROPOSAL,
+            "review": RESULT,
+        }
+        both_started.wait(3)
+        try:
+            return publish_fix(github, task | {"number": 28 + index}, context)
+        except GitHubError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, [1, 2]))
+    assert len(github.opened) == 1
+    assert sum(isinstance(value, dict) for value in outcomes) == 1
+    assert "Open fix draft limit reached" in outcomes
