@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .agent import check_result
+from .core_scope import ROOTS
 from .github import GitHub
 from .kimi import active_instruction, analyze_kimi, invoke
 from .rsi_state import BudgetExhausted, State
@@ -75,6 +76,11 @@ class Settings:
     max_model_calls_per_day: int = 24
     max_open_proposals: int = 2
     publish_projects: bool = False
+    core_scan_enabled: bool = False
+    core_scan_interval_seconds: int = 3600
+    core_model_calls_per_day: int = 24
+    core_revisit_seconds: int = 604800
+    core_scan_roots: list[str] = field(default_factory=lambda: list(ROOTS))
     targets: list[str] = field(
         default_factory=lambda: [
             "scripts/generate_cluster_topology.py",
@@ -85,6 +91,25 @@ class Settings:
     @classmethod
     def load(cls, path, config):
         settings = cls(**json.loads(path.read_text()))
+        if (
+            type(settings.core_scan_enabled) is not bool
+            or any(
+                type(value) is not int
+                for value in [
+                    settings.core_scan_interval_seconds,
+                    settings.core_model_calls_per_day,
+                    settings.core_revisit_seconds,
+                ]
+            )
+            or not 900 <= settings.core_scan_interval_seconds <= 86400
+            or not 2 <= settings.core_model_calls_per_day <= 48
+            or not 86400 <= settings.core_revisit_seconds <= 2592000
+            or not isinstance(settings.core_scan_roots, list)
+            or not settings.core_scan_roots
+            or len(settings.core_scan_roots) > len(ROOTS)
+            or any(root not in ROOTS for root in settings.core_scan_roots)
+        ):
+            raise ValueError("Invalid proactive core-scan scope, schedule or budget")
         if type(settings.publish_projects) is not bool or any(
             type(value) is not int
             for value in [
@@ -112,11 +137,11 @@ class Settings:
         return settings
 
 
-def apply_change(path, original, change):
+def apply_change(path, original, change, max_bytes=50000):
     if change["path"] != path or not change["before"] or original.count(change["before"]) != 1:
         raise ValueError("Proposed change must match one exact snippet in the selected file")
     updated = original.replace(change["before"], change["after"], 1)
-    if updated == original or len(updated.encode()) > 50000:
+    if updated == original or len(updated.encode()) > max_bytes:
         raise ValueError("Empty or oversized project proposal")
     if path.endswith(".py"):
         ast.parse(updated)
@@ -176,7 +201,7 @@ class Worker:
 
     def open_proposals(self):
         opened = self.github.pages(self.github.prefix + "/pulls", self.task)
-        return sum(pr["head"]["ref"].startswith("rsi/project-") for pr in opened)
+        return sum(pr["head"]["ref"].startswith(("rsi/project-", "rsi/core-")) for pr in opened)
 
     async def ask(self, data, schema, policy, directory):
         self.state.reserve(self.budget_limit)
@@ -190,7 +215,7 @@ class Worker:
 
     def feedback(self):
         result = []
-        for row in self.state.recent():
+        for row in self.state.recent("project"):
             record = json.loads(row["result"])
             if row["kind"] == "project" and record.get("pr_number"):
                 pr = self.get(f"/pulls/{record['pr_number']}")
@@ -371,7 +396,7 @@ class Worker:
         cases = json.loads(cases_path.read_text())
         benchmark_hash = hashlib.sha256(cases_path.read_bytes()).hexdigest()
         parent = active_instruction(self.config)
-        for row in self.state.recent():
+        for row in self.state.recent("policy"):
             record = json.loads(row["result"])
             baseline = record.get("baseline", {})
             if (
@@ -464,10 +489,18 @@ class Worker:
             return
         if self.settings.publish_projects:
             self.publish_pending()
+        if self.settings.core_scan_enabled:
+            from .core import CoreScanner
+
+            CoreScanner(self).publish_pending()
         if self.state.used() >= self.budget_limit:
             return
         if self.state.due("policy", self.settings.policy_interval_seconds):
             await self.improve_policy()
+        if self.settings.core_scan_enabled and self.state.due(
+            "core", self.settings.core_scan_interval_seconds
+        ):
+            await CoreScanner(self).scan()
         if self.state.due("project", self.settings.project_interval_seconds):
             await self.project()
 
@@ -476,6 +509,8 @@ def main(config, settings_path, command):
     settings = Settings.load(settings_path, config)
     worker = Worker(config, settings)
     if command == "rsi-status":
+        from .core import CoreScanner
+
         print(
             json.dumps(
                 {
@@ -483,6 +518,8 @@ def main(config, settings_path, command):
                     "limit": worker.budget_limit,
                     "paused": (worker.state.directory / "STOP").exists(),
                     "runs": worker.state.recent(),
+                    "core": CoreScanner(worker).status(),
+                    "core_model_calls_today_utc": worker.state.bucket_used("core"),
                 },
                 ensure_ascii=False,
             )
