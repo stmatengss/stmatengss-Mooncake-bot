@@ -73,6 +73,38 @@ RSI 在 DSW 独立常驻：项目循环每 12 小时检查指定脚本，有实�
 仅在留出集有提升且没有回归时启用新指令。所有入口共享可配置的每日模型调用上限（示例为 24 次），项目循环最多两个开放候选 PR。
 候选 PR 由维护者审阅和合并。
 
+## 主动巡检核心代码
+
+在运行配置 `rsi.json` 中启用 `core_scan_enabled=true` 后，常驻 RSI worker 每小时自动
+轮转 Store、TransferEngine/TENT、Common、P2P Store、Store-RS 和 Conductor 的原生源码。
+不需要创建 Issue 或输入命令。`core_scan_roots` 可缩小到这些已登记的源码目录。
+
+每轮从默认分支的固定提交选择最多三个模块的源码窗口，并读取对应头文件和目录级
+`AGENTS.md`。大文件按有重叠的窗口处理，支持最多 1 MB 的现有文件；不会执行仓库代码。
+游标持久保存在 SQLite 中，重启后继续轮转。源码内容变化后重新登记；不变内容完成一轮后
+默认等待七天再扫。扫描是局部静态分析，计数表示窗口处理记录，不等同于完整审计或测试覆盖率。
+
+候选必须有具体触发条件、影响和精确匹配的单文件补丁，最多改动 80 行。另一次独立模型调用
+必须同时确认原问题成立、修复正确且上下文足够，才进入发布队列。C++/Rust/Go 等候选没有
+编译或运行测试，草稿中会明确说明。与开放 PR 涉及的文件重叠时跳过；相同补丁不会反复提交。
+
+开启 `publish_projects=true` 后，可信发布器自动创建 `rsi/core-*` 分支和草稿 PR。
+它会复核全部输入 blob、目录指令和已审查补丁，并保留文件 mode。主分支有无关更新时，
+输入完全不变的候选可以重新校验后发布到新 base。输入变化则放弃旧候选，不发布陈旧结果。
+
+核心巡检默认最多使用每天 24 次调用，计入现有共享总额；失败调用同样计数。
+Store 脚本候选与核心候选共享 `max_open_proposals` 上限（默认两个开放 PR）。
+开放 PR 满额时，最多额外保存同样数量的已验证待发布候选；满额后等待审核释放容量。
+容量释放后自动发布，无需重新生成或手动触发。未知远端写入结果不会自动重放。
+
+查看当前预算、已处理窗口和候选状态：
+
+```sh
+mooncake-bot rsi-status --config /root/mooncake-bot/config.toml --rsi-config /root/mooncake-bot/rsi.json
+```
+
+`touch data/rsi/STOP` 会同时暂停脚本巡检、核心巡检和审查指令改进；删除后自动恢复。
+
 ## 本地开发
 
 ```sh
@@ -145,7 +177,7 @@ broader quality claims. A tie or regression retains the current instruction.
 
 ## Limits, failure and recovery
 
-- Manual commands, automatic tasks and RSI share **24 model invocations per UTC day**,
+- Manual commands, automatic tasks and RSI share a configurable daily allowance (**24 in examples**),
   including failed invocations. A fix normally needs two calls: proposal and independent review.
   Help, status, title normalization and CI retry use no model. Model tasks wait in the durable
   queue until the next UTC reset if the budget is exhausted; utility commands can still run.
@@ -154,8 +186,9 @@ broader quality claims. A tie or regression retains the current instruction.
   To raise the deployed allowance, update `max_model_calls_per_day` consistently in the live
   `config.toml` and `rsi.json`, then restart the bot and RSI programs. Confirm the effective
   allowance with `status` and `rsi-status`; changing the limit does not clear recorded usage.
-- At most two project candidate PRs may remain open. Identical source content is
-  not proposed again after a completed, failed or interrupted attempt.
+- At most two script/core candidate PRs may remain open by default. Legacy script proposals
+  deduplicate identical source forever; proactive core windows use durable rotation, content
+  identities, a revisit cooldown and patch-level duplicate suppression.
 - Restart never automatically repeats an interrupted attempt or ambiguous remote
   write. Inspect its artifacts and GitHub before manually retrying.
 - Kimi uses an isolated `KIMI_CODE_HOME`, a tool-free agent and an empty skills
