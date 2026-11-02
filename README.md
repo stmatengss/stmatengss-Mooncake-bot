@@ -83,6 +83,8 @@ RSI 在 DSW 独立常驻：项目循环每 12 小时检查指定脚本，有实�
 `AGENTS.md`。大文件按有重叠的窗口处理，支持最多 1 MB 的现有文件；不会执行仓库代码。
 游标持久保存在 SQLite 中，重启后继续轮转。源码内容变化后重新登记；不变内容完成一轮后
 默认等待七天再扫。扫描是局部静态分析，计数表示窗口处理记录，不等同于完整审计或测试覆盖率。
+已处理过但 blob 发生变化的文件优先重查；其余按模块轮转，并优先选择实现文件，减少仅审阅
+声明头文件的调用。这个排序策略的变更不代表缺陷发现率已有实测提升。
 
 候选必须有具体触发条件、影响和精确匹配的单文件补丁，最多改动 80 行。另一次独立模型调用
 必须同时确认原问题成立、修复正确且上下文足够，才进入发布队列。C++/Rust/Go 等候选没有
@@ -94,8 +96,29 @@ RSI 在 DSW 独立常驻：项目循环每 12 小时检查指定脚本，有实�
 
 核心巡检默认最多使用每天 24 次调用，计入现有共享总额；失败调用同样计数。
 Store 脚本候选与核心候选共享 `max_open_proposals` 上限（默认两个开放 PR）。
-开放 PR 满额时，最多额外保存同样数量的已验证待发布候选；满额后等待审核释放容量。
+开放 PR 满额时，继续扫描其他文件，最多额外保存 `core_max_pending_proposals` 个已验证
+待发布核心候选（默认八个）。这与开放 PR 上限独立；队列满额后等待审核释放容量。
 容量释放后自动发布，无需重新生成或手动触发。未知远端写入结果不会自动重放。
+默认分支更新后，即使 PR 已满或模型预算耗尽，也会检查待发布候选的输入是否仍有效；
+失效候选退出队列并安排重新分析，不发布过期补丁。
+
+## 定时同步 upstream main
+
+在运行配置 `rsi.json` 中设置 `upstream_sync_enabled=true`，worker 每小时独立检查
+`kvcache-ai/Mooncake:main`，将上游更新同步到已登记的 fork 的 `main`。
+`upstream_sync_interval_seconds` 可设为 900–86400 秒，默认 3600 秒。
+同步不调用模型、不占用候选 PR 名额；模型预算耗尽或候选队列满额时仍会执行。
+
+同步前核对 fork 和父仓库的数字 ID、仓库名及默认分支，使用
+[GitHub merge-upstream API](https://docs.github.com/en/rest/branches/branches#sync-a-fork-branch-with-the-upstream-repository)
+进行普通合并，保留 fork 自身提交，不强制推送。发生冲突或权限失败时记录结果，按配置间隔
+重新检查，不自动覆盖历史或解决冲突。`publish=false` 阻止同步写入；`data/rsi/STOP` 同时
+暂停同步和 RSI。启用同步后，下一轮代码巡检使用同步后的默认分支。
+
+同步专用 installation token 仅授权已登记的目标仓库，包含 Contents 和 Workflows write，
+以允许同步上游已有的 workflow 文件；普通审查和修复 token 不增加 Workflows 权限。
+这不允许模型修改 workflow 或访问 GitHub 凭据。`rsi-status` 中的 `upstream` 显示最近
+同步、错误与下次检查时间，`core.scan_wait_reason` 显示预算或候选容量等待原因。
 
 查看当前预算、已处理窗口和候选状态：
 

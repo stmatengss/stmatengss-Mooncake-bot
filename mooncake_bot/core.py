@@ -43,6 +43,18 @@ class CoreScanner:
     def status(self):
         progress = self.state.core_progress()
         path = self.state.directory / "core-inventory.json"
+        pending = self.state.core_problems({"pending", "evaluating", "publishing", "ambiguous"})
+        reason = None
+        if not self.settings.core_scan_enabled:
+            reason = "disabled"
+        elif (self.state.directory / "STOP").exists():
+            reason = "paused"
+        elif len(pending) >= self.settings.core_max_pending_proposals:
+            reason = "pending_capacity"
+        elif self.worker.budget_limit - self.state.used() < 2:
+            reason = "shared_budget"
+        elif self.settings.core_model_calls_per_day - self.state.bucket_used("core") < 2:
+            reason = "core_budget"
         return {
             "enabled": self.settings.core_scan_enabled,
             "interval_seconds": self.settings.core_scan_interval_seconds,
@@ -52,9 +64,10 @@ class CoreScanner:
             "tracked_files": len(progress),
             "attempted_windows": sum(r["attempts"] for r in progress.values()),
             "reviewed_windows": sum(r["reviewed"] for r in progress.values()),
-            "pending": self.state.core_problems(
-                {"pending", "evaluating", "publishing", "ambiguous"}
-            ),
+            "pending": pending,
+            "pending_limit": self.settings.core_max_pending_proposals,
+            "scan_wait_reason": reason,
+            "selection_strategy": "changed blobs first; implementation before declarations; module rotation",
             "scope": self.settings.core_scan_roots,
         }
 
@@ -101,7 +114,7 @@ class CoreScanner:
 
     def select(self, inventory, blocked):
         progress = self.state.core_progress()
-        modules = {}
+        modules, changed_modules = {}, set()
         last = {}
         for path, row in progress.items():
             module = path.split("/")[0]
@@ -111,8 +124,12 @@ class CoreScanner:
             unchanged = old.get("blob") == entry["sha"]
             if path in blocked or (unchanged and old["revisit_after"] > self.state.now()):
                 continue
-            priority = (old.get("last_attempt", 0) if unchanged else 0, *risk(path))
-            modules.setdefault(path.split("/")[0], []).append((priority, entry))
+            changed = bool(old) and not unchanged
+            module = path.split("/")[0]
+            if changed:
+                changed_modules.add(module)
+            priority = (not changed, old.get("last_attempt", 0) if unchanged else 0, *risk(path))
+            modules.setdefault(module, []).append((priority, entry))
         preferred = [
             "mooncake-store",
             "mooncake-transfer-engine",
@@ -121,7 +138,9 @@ class CoreScanner:
             "mooncake-store-rs",
             "mooncake-conductor",
         ]
-        order = sorted(modules, key=lambda m: (last.get(m, 0), preferred.index(m)))
+        order = sorted(
+            modules, key=lambda m: (m not in changed_modules, last.get(m, 0), preferred.index(m))
+        )
         return [min(modules[module], key=lambda r: r[0])[1] for module in order[:3]]
 
     def guidance(self, paths, base):
@@ -182,7 +201,7 @@ class CoreScanner:
         if remaining < 2:
             return
         pending = self.state.core_problems({"pending", "evaluating", "publishing", "ambiguous"})
-        if len(pending) >= self.settings.max_open_proposals:
+        if len(pending) >= self.settings.core_max_pending_proposals:
             return
         pulls, blocked = self.open_work()
         base = self.get("/commits/" + self.settings.base_ref)["sha"]
@@ -369,8 +388,73 @@ class CoreScanner:
         if self.settings.publish_projects:
             self.publish_pending()
 
+    def refresh_pending(self):
+        """Retire stale inputs even while all publication slots are occupied."""
+        pending = self.state.core_problems({"pending"})
+        if not pending:
+            return
+        base = self.get("/commits/" + self.settings.base_ref)["sha"]
+        marker = self.state.directory / "core-pending-check.json"
+        identity = {"base": base, "runs": sorted(row["run_id"] for row in pending)}
+        if marker.exists():
+            try:
+                if json.loads(marker.read_text()) == identity:
+                    return
+            except (ValueError, OSError):
+                pass
+        inventory = None
+        for row in pending:
+            candidate = {}
+            try:
+                candidate = json.loads(
+                    (self.state.directory / row["run_id"] / "candidate.json").read_text()
+                )
+                if not isinstance(candidate, dict):
+                    candidate = {}
+                    raise ValueError("Invalid candidate artifact")
+                if candidate["base"] == base:
+                    continue
+                if inventory is None:
+                    inventory = self.inventory(base)
+                inputs = candidate["supporting"] + candidate["record"]["sources"]
+                if any(inventory.get(r["path"], {}).get("sha") != r["blob"] for r in inputs):
+                    raise ValueError("Core input changed")
+                if (
+                    self.guidance([r["path"] for r in candidate["record"]["sources"]], base)
+                    != candidate["guidance"]
+                ):
+                    raise ValueError("Core guidance changed")
+            except (ValueError, KeyError, TypeError, OSError):
+                self.state.problem(row["key"], "stale_input")
+                window = candidate.get("window")
+                if isinstance(window, dict) and type(window.get("window")) is int:
+                    self.state.core_retry(
+                        row["path"],
+                        window["window"],
+                        self.settings.core_scan_interval_seconds,
+                    )
+                self.state.finish(
+                    row["run_id"],
+                    "stale_input",
+                    {
+                        "path": row["path"],
+                        "problem_key": row["key"],
+                        "error": "ChangedOrMissingInput",
+                    },
+                )
+        atomic_json(
+            marker,
+            {
+                "base": base,
+                "runs": sorted(row["run_id"] for row in self.state.core_problems({"pending"})),
+            },
+        )
+
     def publish_pending(self):
-        if not self.settings.core_scan_enabled or not self.settings.publish_projects:
+        if not self.settings.core_scan_enabled:
+            return
+        self.refresh_pending()
+        if not self.settings.publish_projects:
             return
         pending = self.state.core_problems({"pending"})
         if not pending or self.worker.open_proposals() >= self.settings.max_open_proposals:

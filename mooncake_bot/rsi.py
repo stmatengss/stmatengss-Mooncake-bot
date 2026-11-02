@@ -80,6 +80,9 @@ class Settings:
     core_scan_interval_seconds: int = 3600
     core_model_calls_per_day: int = 24
     core_revisit_seconds: int = 604800
+    core_max_pending_proposals: int = 8
+    upstream_sync_enabled: bool = False
+    upstream_sync_interval_seconds: int = 3600
     core_scan_roots: list[str] = field(default_factory=lambda: list(ROOTS))
     targets: list[str] = field(
         default_factory=lambda: [
@@ -99,11 +102,17 @@ class Settings:
                     settings.core_scan_interval_seconds,
                     settings.core_model_calls_per_day,
                     settings.core_revisit_seconds,
+                    settings.core_max_pending_proposals,
+                    settings.upstream_sync_interval_seconds,
                 ]
             )
             or not 900 <= settings.core_scan_interval_seconds <= 86400
             or not 2 <= settings.core_model_calls_per_day <= 48
             or not 86400 <= settings.core_revisit_seconds <= 2592000
+            or not 1 <= settings.core_max_pending_proposals <= 20
+            or type(settings.upstream_sync_enabled) is not bool
+            or not 900 <= settings.upstream_sync_interval_seconds <= 86400
+            or (settings.upstream_sync_enabled and settings.base_ref != "main")
             or not isinstance(settings.core_scan_roots, list)
             or not settings.core_scan_roots
             or len(settings.core_scan_roots) > len(ROOTS)
@@ -487,6 +496,10 @@ class Worker:
     async def step(self):
         if (self.state.directory / "STOP").exists():
             return
+        from .upstream import UpstreamSync
+
+        # Repository maintenance does not spend model budget or consume draft slots.
+        UpstreamSync(self).run_if_due()
         if self.settings.publish_projects:
             self.publish_pending()
         if self.settings.core_scan_enabled:
@@ -510,6 +523,7 @@ def main(config, settings_path, command):
     worker = Worker(config, settings)
     if command == "rsi-status":
         from .core import CoreScanner
+        from .upstream import UpstreamSync
 
         print(
             json.dumps(
@@ -519,6 +533,7 @@ def main(config, settings_path, command):
                     "paused": (worker.state.directory / "STOP").exists(),
                     "runs": worker.state.recent(),
                     "core": CoreScanner(worker).status(),
+                    "upstream": UpstreamSync(worker).status(),
                     "core_model_calls_today_utc": worker.state.bucket_used("core"),
                 },
                 ensure_ascii=False,

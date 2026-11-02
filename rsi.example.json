@@ -10,6 +10,9 @@
   "core_scan_interval_seconds": 3600,
   "core_model_calls_per_day": 24,
   "core_revisit_seconds": 604800,
+  "core_max_pending_proposals": 8,
+  "upstream_sync_enabled": false,
+  "upstream_sync_interval_seconds": 3600,
   "targets": [
     "scripts/generate_cluster_topology.py",
     "scripts/check_hicache_hugepage_requirements.py"

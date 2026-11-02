@@ -91,4 +91,6 @@ def guidance_paths(paths):
 def risk(path):
     name = PurePosixPath(path).stem.lower()
     words = ("allocator", "metadata", "client", "transport", "master", "memory", "rpc")
-    return (-sum(word in name for word in words), path)
+    # Executable implementation usually supplies stronger evidence than declarations.
+    header = PurePosixPath(path).suffix in {".h", ".hpp", ".cuh"}
+    return (int(header), -sum(word in name for word in words), path)
