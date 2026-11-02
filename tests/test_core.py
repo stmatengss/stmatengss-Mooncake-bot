@@ -184,6 +184,11 @@ def test_settings_enroll_core_without_loosening_legacy_targets(tmp_path):
         {"core_model_calls_per_day": 0},
         {"core_scan_interval_seconds": 10},
         {"core_scan_enabled": "true"},
+        {"core_max_pending_proposals": True},
+        {"core_max_pending_proposals": 21},
+        {"upstream_sync_enabled": "true"},
+        {"upstream_sync_interval_seconds": 1},
+        {"upstream_sync_enabled": True, "base_ref": "feature"},
         {"targets": [PATH]},
     ]:
         path.write_text(json.dumps(settings.__dict__ | changes))
@@ -437,3 +442,82 @@ def test_missing_or_corrupt_pending_artifacts_do_not_crash_the_scheduler(scanner
     scanner.publish_pending()
     assert scanner.state.recent()[0]["state"] == "stale_input"
     assert not scanner.github.writes
+
+
+def test_pending_backlog_has_its_own_limit_without_raising_open_pr_capacity(scanner):
+    scanner.settings.max_open_proposals = 1
+    scanner.settings.core_max_pending_proposals = 3
+    for number in range(2):
+        run = scanner.state.begin("core", f"existing-{number}")
+        scanner.state.claim_problem(str(number), run, f"mooncake-common/src/pending{number}.cpp")
+        scanner.state.problem(str(number), "pending")
+    asyncio.run(scanner.scan())
+    assert len(scanner.calls) == 2
+    assert len(scanner.state.core_problems({"pending"})) == 3
+    assert scanner.status()["scan_wait_reason"] == "pending_capacity"
+    asyncio.run(scanner.scan())
+    assert len(scanner.calls) == 2 and not scanner.github.writes
+    assert scanner.settings.max_open_proposals == 1
+
+
+def test_selection_prefers_executable_source_to_declaration_headers(scanner):
+    scanner.github.sources["mooncake-store/include/allocator.h"] = "class Allocator;\n"
+    selected = scanner.select(scanner.inventory(scanner.github.head), set())
+    assert selected[0]["path"] == PATH
+
+
+def test_changed_blobs_take_priority_over_unseen_files_and_module_age(scanner):
+    scanner.state.core_attempt(PATH, identity(SOURCE), 0, 1)
+    scanner.state.core_reviewed(PATH, True, 604800)
+    scanner.github.sources[PATH] += "// changed upstream implementation\n"
+    scanner.github.sources["mooncake-store/src/allocator_a.cpp"] = "int other() { return 1; }\n"
+    scanner.github.sources["mooncake-common/src/allocator.cpp"] = "int common() { return 1; }\n"
+    selected = scanner.select(scanner.inventory(scanner.github.head), set())
+    assert selected[0]["path"] == PATH
+
+
+def test_stale_pending_inputs_retire_even_with_full_pr_capacity_and_no_model_budget(scanner):
+    asyncio.run(scanner.scan())
+    scanner.settings.publish_projects = True
+    scanner.settings.max_open_proposals = 1
+    scanner.github.pulls = [{"number": 5, "head": {"ref": "rsi/project-existing"}}]
+    scanner.github.files[5] = [{"filename": "scripts/a.py"}]
+    scanner.config.max_model_calls_per_day = scanner.state.used()
+    scanner.github.head = "e" * 40
+    scanner.github.sources[PATH] += "// upstream changed the analyzed input\n"
+    scanner.publish_pending()
+    assert not scanner.state.core_problems({"pending"})
+    assert scanner.state.recent("core")[0]["state"] == "stale_input"
+    assert len(scanner.calls) == 2 and not scanner.github.writes
+
+
+def test_pending_freshness_check_is_cached_but_new_main_is_rechecked(scanner):
+    asyncio.run(scanner.scan())
+    scanner.github.head = "e" * 40
+    scanner.refresh_pending()
+    assert scanner.state.core_problems({"pending"})
+    scanner.github.head = "f" * 40
+    scanner.github.guidance["AGENTS.md"] = "New upstream rules"
+    scanner.refresh_pending()
+    assert not scanner.state.core_problems({"pending"})
+
+
+def test_temporary_github_failure_preserves_pending_candidates_for_retry(scanner):
+    from mooncake_bot.github import GitHubError
+
+    asyncio.run(scanner.scan())
+    scanner.github.head = "e" * 40
+    scanner.inventory = lambda base: (_ for _ in ()).throw(GitHubError("network unavailable"))
+    with pytest.raises(GitHubError):
+        scanner.refresh_pending()
+    assert scanner.state.core_problems({"pending"}) and not scanner.github.writes
+
+
+@pytest.mark.parametrize("corrupt", ["[]", "null", '{"window": 7}'])
+def test_malformed_pending_artifacts_do_not_keep_the_backlog_stuck(scanner, corrupt):
+    asyncio.run(scanner.scan())
+    row = scanner.state.core_problems({"pending"})[0]
+    (scanner.state.directory / row["run_id"] / "candidate.json").write_text(corrupt)
+    scanner.refresh_pending()
+    assert not scanner.state.core_problems({"pending"})
+    assert scanner.state.recent("core")[0]["state"] == "stale_input"

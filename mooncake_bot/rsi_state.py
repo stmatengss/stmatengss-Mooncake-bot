@@ -108,6 +108,9 @@ class State:
     def recover(self):
         with self.db() as db:
             db.execute("UPDATE runs SET state='interrupted' WHERE state='running'")
+            db.execute(
+                "UPDATE runs SET state='unconfirmed' WHERE kind='upstream_sync' AND state='syncing'"
+            )
             db.execute("UPDATE core_problems SET state='interrupted' WHERE state='evaluating'")
             db.execute("UPDATE core_problems SET state='ambiguous' WHERE state='publishing'")
 

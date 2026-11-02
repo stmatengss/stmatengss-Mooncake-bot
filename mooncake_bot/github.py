@@ -13,6 +13,10 @@ from .commands import AUTO_FLAGS, SKIP, fingerprint
 class GitHubError(Exception):
     """Safe to display: never contains response bodies, credentials or request URLs."""
 
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class GitHub:
     def __init__(self, config):
@@ -32,13 +36,24 @@ class GitHub:
             **kwargs,
         )
         if response.status_code >= 400:
-            raise GitHubError(f"GitHub {method} failed (HTTP {response.status_code})")
+            raise GitHubError(
+                f"GitHub {method} failed (HTTP {response.status_code})", response.status_code
+            )
         return response.json() if response.content else None
 
-    def token(self, installation, write=False, contents_write=False, actions_write=False):
+    def token(
+        self,
+        installation,
+        write=False,
+        contents_write=False,
+        actions_write=False,
+        workflows_write=False,
+    ):
         if installation not in self.config.installation_ids:
             raise GitHubError("Installation is not enrolled")
-        key = (installation, write, contents_write, actions_write)
+        if workflows_write and not contents_write:
+            raise GitHubError("Workflow sync requires Contents write permission")
+        key = (installation, write, contents_write, actions_write, workflows_write)
         cached = self.tokens.get(key)
         if cached and cached[0] > time.time():
             return cached[1]
@@ -50,6 +65,8 @@ class GitHub:
             "statuses": "read",
             "actions": "write" if actions_write else "read",
         }
+        if workflows_write:
+            permissions["workflows"] = "write"
         result = self.request(
             "POST",
             f"/app/installations/{installation}/access_tokens",
