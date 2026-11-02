@@ -32,6 +32,8 @@ EXCLUDED = {
     ".git",
     ".github",
     "cachelib_memory_allocator",
+    "mooncake-store-test-utils",
+    "mooncake-store-e2e",
 }
 MAX_SOURCE_BYTES = 1_000_000
 WINDOW_BYTES = 12000

@@ -155,6 +155,8 @@ def scanner(tmp_path, monkeypatch):
         "mooncake-store/include/vendor/a.h",
         "mooncake-store/src/cachelib_memory_allocator/a.cpp",
         "mooncake-transfer-engine/tent/include/thirdparty/a.h",
+        "mooncake-store-rs/crates/mooncake-store-test-utils/src/metadata.rs",
+        "mooncake-store-rs/crates/mooncake-store-e2e/src/bin/nof_multi_client.rs",
     ],
 )
 def test_core_scope_rejects_unenrolled_or_generated_files(path):
