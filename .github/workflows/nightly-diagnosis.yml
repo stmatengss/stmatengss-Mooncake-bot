@@ -1,0 +1,77 @@
+name: Upstream nightly diagnosis
+
+on:
+  schedule:
+    - cron: "37 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Upstream nightly-failure issue number (empty selects recent failures)
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/nightly-diagnosis.yml"
+      - "mooncake_bot/nightly.py"
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+  checks: read
+
+jobs:
+  diagnose:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: nightly-diagnosis-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install .
+      - name: Restore recent diagnoses
+        if: github.event_name == 'schedule'
+        uses: actions/cache@v4
+        with:
+          path: data/nightly
+          key: nightly-${{ hashFiles('mooncake_bot/nightly.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: nightly-${{ hashFiles('mooncake_bot/nightly.py') }}-
+      - name: Diagnose upstream nightly failures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ inputs.issue }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          mkdir -p data/nightly
+          find data/nightly -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -r -- {} +
+          if [[ -n "$ISSUE" ]]; then
+            mooncake-nightly diagnose --issue "$ISSUE"
+          elif [[ "$EVENT" == pull_request ]]; then
+            mooncake-nightly diagnose --limit 1
+          else
+            mooncake-nightly diagnose
+          fi
+      - name: Publish report in run summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          for report in data/nightly/*/diagnosis.md; do
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-diagnoses-${{ github.run_attempt }}
+          path: |
+            data/nightly/*/diagnosis.json
+            data/nightly/*/diagnosis.md
+          if-no-files-found: ignore
+          retention-days: 14
