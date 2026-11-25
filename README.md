@@ -9,6 +9,28 @@ artifacts outside Git; the directory's `.gitignore` excludes them.
 GitHub App：[`stmatengss-mooncake-bot`](https://github.com/apps/stmatengss-mooncake-bot)。
 Bot 源码在本仓库独立维护；业务仓库是 `stmatengss/Mooncake`。
 
+## 社区 nightly 诊断与草稿 PR
+
+`mooncake-nightly diagnose --issue 5779` 从社区仓库的 `nightly-failure` issue 定位 run，
+检查该次 attempt 的失败步骤、日志和 GitHub runner 注解，并对比最多四次较早的同类 nightly。
+报告保存在 `data/nightly/<issue>-<run>-<attempt>/diagnosis.md` 和同目录的 JSON。
+无法定位原因的步骤会保留 job 链接。相同 attempt 的完整报告会复用，`--refresh` 可重新抓取。
+省略 `--issue` 时检查最近的失败。托管工作流每四小时检查一次，在运行摘要和 artifact 中提供报告。
+诊断进程只读 GitHub，可使用 `MOONCAKE_NIGHTLY_READ_TOKEN`、Actions 的 `GH_TOKEN` 或本机 `gh` 登录。
+
+上游草稿由独立机器账号提交。先以该账号 fork `kvcache-ai/Mooncake`，然后在可信工作站准备基于社区
+main 的单个提交，按社区要求逐行审阅、由实际作者签署 DCO，并填写上游 PR 模板。发布命令核对 GitHub
+登录身份、fork 的所有者与父仓库、失败 job、提交和签署记录，将同一个 Git 对象推到 fork，再创建草稿。
+重试会找回同一草稿。这里的发布凭据只供发布程序使用，诊断工作流只领取只读凭据。
+
+```sh
+mooncake-nightly draft --account "$agent_login" --issue "$issue" --job "$job_id" \
+  --checkout "$checkout" --reviewed-commit "$reviewed_sha" --body-file "$pr_body"
+```
+
+机器账号可以通过独立的 GitHub CLI 登录或 `MOONCAKE_AGENT_TOKEN` 授权。发布器通过
+`GET /user` 校验独立账号。涉及 workflow 的已审阅提交还需要该账号拥有更新自己 fork 的 workflow 文件的权限。
+
 ## 使用方法
 
 在 `stmatengss/Mooncake` 的 Issue 或开放 PR 下新发一条评论。维护者可使用：
